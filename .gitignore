@@ -15,9 +15,10 @@ venv/
 env/
 .env/
 
-# IDE
+# JetBrains IDE
 .vscode/
 .idea/
+.claude/
 *.swp
 *.swo
 *~
