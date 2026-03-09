@@ -23,43 +23,18 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import __version__, TOKENS_DIR, CONFIG_FILE, STATE_FILE, STATIC_DIR, DATA_DIR
+from . import __version__, TOKENS_DIR, CONFIG_FILE, STATE_FILE, STATIC_DIR, DATA_DIR, storage
 from .register import EventEmitter, run, _fetch_proxy_from_pool
 from .mail_providers import create_provider, MultiMailRouter
 from .pool_maintainer import PoolMaintainer, Sub2ApiMaintainer
 
 # ==========================================
-# 同步配置（内存持久化到 data/sync_config.json）
+# 同步配置（通过 storage 后端持久化）
 # ==========================================
-
-# CONFIG_FILE 和 TOKENS_DIR 已从包 __init__.py 导入
 
 
 def _load_sync_config() -> Dict[str, str]:
-    if CONFIG_FILE.exists():
-        try:
-            return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return {
-        "base_url": "", "bearer_token": "", "account_name": "AutoReg", "auto_sync": "false",
-        "cpa_base_url": "", "cpa_token": "", "min_candidates": 800,
-        "used_percent_threshold": 95, "auto_maintain": False, "maintain_interval_minutes": 30,
-        "upload_mode": "snapshot",
-        "mail_provider": "mailtm",
-        "mail_config": {"api_base": "https://api.mail.tm", "api_key": "", "bearer_token": ""},
-        "sub2api_min_candidates": 200,
-        "sub2api_auto_maintain": False,
-        "sub2api_maintain_interval_minutes": 30,
-        "proxy": "",
-        "auto_register": False,
-        "proxy_pool_enabled": True,
-        "proxy_pool_api_url": "https://zenproxy.top/api/fetch",
-        "proxy_pool_auth_mode": "query",
-        "proxy_pool_api_key": "19c0ec43-8f76-4c97-81bc-bcda059eeba4",
-        "proxy_pool_count": 1,
-        "proxy_pool_country": "US",
-    }
+    return storage.load_config()
 
 
 def _normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -136,7 +111,7 @@ def _pool_relay_url_from_fetch_url(api_url: str) -> str:
 
 
 def _save_sync_config(cfg: Dict[str, str]) -> None:
-    CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    storage.save_config(cfg)
 
 
 _sync_config = _normalize_config(_load_sync_config())
@@ -196,34 +171,14 @@ def _is_cpa_uploaded(token_data: Dict[str, Any]) -> bool:
     return "cpa" in _extract_uploaded_platforms(token_data)
 
 
-def _mark_token_uploaded_platform(file_path: str, platform: str) -> bool:
+def _mark_token_uploaded_platform(filename: str, platform: str) -> bool:
+    """标记 Token 已被推送到平台。目前策略为：只要推送到任一平台成功，即刻自动删除该本地/Redis Token 数据，不再保留死数据。"""
     platform_name = str(platform).strip().lower()
     if platform_name not in UPLOAD_PLATFORMS:
         return False
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            token_data = json.load(f)
-        if not isinstance(token_data, dict):
-            return False
-
-        platforms = _extract_uploaded_platforms(token_data)
-        if platform_name not in platforms:
-            platforms.append(platform_name)
-        token_data["uploaded_platforms"] = [p for p in UPLOAD_PLATFORMS if p in set(platforms)]
-        token_data[f"{platform_name}_uploaded"] = True
-        token_data[f"{platform_name}_synced"] = True
-
-        if platform_name == "sub2api":
-            token_data["synced"] = True  # 兼容旧前端逻辑
-
-        uploaded_at = token_data.get("uploaded_at")
-        if not isinstance(uploaded_at, dict):
-            uploaded_at = {}
-        uploaded_at[platform_name] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        token_data["uploaded_at"] = uploaded_at
-
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(token_data, f, ensure_ascii=False)
+        if storage.token_exists(filename):
+            storage.delete_token(filename)
         return True
     except Exception:
         return False
@@ -233,26 +188,13 @@ def _mark_token_uploaded_platform(file_path: str, platform: str) -> bool:
 # 统计数据持久化
 # ==========================================
 
-# STATE_FILE 已从包 __init__.py 导入
-
 
 def _load_state() -> Dict[str, int]:
-    if STATE_FILE.exists():
-        try:
-            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return {"success": 0, "fail": 0}
+    return storage.load_state()
 
 
 def _save_state(success: int, fail: int) -> None:
-    try:
-        STATE_FILE.write_text(
-            json.dumps({"success": success, "fail": fail}),
-            encoding="utf-8",
-        )
-    except Exception:
-        pass
+    storage.save_state(success, fail)
 
 
 # ==========================================
@@ -261,9 +203,7 @@ def _save_state(success: int, fail: int) -> None:
 
 app = FastAPI(title="OpenAI Pool Orchestrator", version=__version__)
 
-# STATIC_DIR 和 TOKENS_DIR 已从包 __init__.py 导入
 STATIC_DIR.mkdir(exist_ok=True)
-os.makedirs(str(TOKENS_DIR), exist_ok=True)
 
 # ==========================================
 # 任务状态管理
@@ -489,7 +429,7 @@ class TaskState:
                     _save_state(self.success_count, self.fail_count)
                 emitter.error(f"{prefix}平台上传未完成，本次不计入成功: {email}", step="retry")
 
-        def _auto_sync(file_name: str, email: str, em: "EventEmitter") -> bool:
+        def _auto_sync(file_name: str, token_data: Dict[str, Any], email: str, em: "EventEmitter") -> bool:
             cfg = _sync_config
             if cfg.get("auto_sync", "true") != "true":
                 return True
@@ -500,12 +440,8 @@ class TaskState:
                 return False
 
             em.info(f"正在自动同步 {email}...", step="sync")
-            fpath = os.path.join(TOKENS_DIR, file_name)
-            try:
-                with open(fpath, "r", encoding="utf-8") as f:
-                    token_data = json.load(f)
-            except Exception as e:
-                em.error(f"自动同步异常: 读取本地 Token 失败: {e}", step="sync")
+            if not token_data:
+                em.error(f"自动同步异常: Token 数据为空", step="sync")
                 return False
 
             last_status = 0
@@ -516,7 +452,7 @@ class TaskState:
                     last_status = int(result.get("status") or 0)
                     last_body = str(result.get("body") or "")
                     if result.get("ok"):
-                        if not _mark_token_uploaded_platform(fpath, "sub2api"):
+                        if not _mark_token_uploaded_platform(file_name, "sub2api"):
                             em.warn(f"自动同步成功但本地标记失败: {email}", step="sync")
                         em.success(f"自动同步成功: {email}", step="sync")
                         return True
@@ -536,7 +472,7 @@ class TaskState:
                 td = json.loads(token_json)
                 cpa_ok = pool_maintainer.upload_token(file_name, td, proxy=proxy or "")
                 if cpa_ok:
-                    if not _mark_token_uploaded_platform(file_path, "cpa"):
+                    if not _mark_token_uploaded_platform(file_name, "cpa"):
                         emitter.warn(f"{prefix}CPA 上传成功但本地标记失败: {email}", step="cpa_upload")
                     emitter.success(f"{prefix}CPA 上传成功: {email}", step="cpa_upload")
                 else:
@@ -546,13 +482,13 @@ class TaskState:
                 emitter.error(f"{prefix}CPA 上传异常: {ex}", step="cpa_upload")
                 return False
 
-        def _upload_to_sub2api(file_name: str, email: str, refresh_token: str, prefix: str) -> bool:
+        def _upload_to_sub2api(file_name: str, token_data: Dict[str, Any], email: str, refresh_token: str, prefix: str) -> bool:
             if not auto_sync_enabled:
                 return True
             if not refresh_token:
                 emitter.error(f"{prefix}缺少 refresh_token，无法自动同步: {email}", step="sync")
                 return False
-            return _auto_sync(file_name, email, emitter)
+            return _auto_sync(file_name, token_data, email, emitter)
 
         def _register_decoupled_token(
             token_key: str,
@@ -659,6 +595,7 @@ class TaskState:
                 elif platform == "sub2api":
                     ok = _upload_to_sub2api(
                         file_name=job["file_name"],
+                        token_data=json.loads(job["token_json"]) if job.get("token_json") else {},
                         email=job["email"],
                         refresh_token=job.get("refresh_token", ""),
                         prefix=job.get("prefix", ""),
@@ -717,9 +654,8 @@ class TaskState:
                             email = "unknown"
 
                         file_name = f"token_{fname_email}_{time.time_ns()}.json"
-                        file_path = os.path.join(TOKENS_DIR, file_name)
-                        with open(file_path, "w", encoding="utf-8") as f:
-                            f.write(token_json)
+                        file_path = file_name  # 保留变量名兼容下游引用
+                        storage.save_token(file_name, token_json)
 
                         emitter.success(f"{prefix}Token 已保存: {file_name}", step="saved")
                         self.broadcast({
@@ -1054,35 +990,24 @@ async def api_status() -> Dict[str, Any]:
 @app.get("/api/tokens")
 async def api_tokens() -> Dict[str, Any]:
     tokens = []
-    if os.path.isdir(TOKENS_DIR):
-        # 按文件名中的时间戳降序排列（最新注册的在最前面）
-        # 文件名格式: token_email_1234567890.json，取最后一段数字作为时间戳
-        import re
-        def _sort_key(f):
-            m = re.search(r'_(\d{10,})\.json$', f)
-            return int(m.group(1)) if m else 0
-        all_files = [f for f in os.listdir(TOKENS_DIR) if f.endswith(".json")]
-        all_files.sort(key=_sort_key, reverse=True)
-        for fname in all_files:
-            if not fname.endswith(".json"):
-                continue
-            fpath = os.path.join(TOKENS_DIR, fname)
-            try:
-                with open(fpath, "r", encoding="utf-8") as f:
-                    content_raw = json.load(f)
-                content = content_raw if isinstance(content_raw, dict) else {}
-                uploaded_platforms = _extract_uploaded_platforms(content)
-                tokens.append(
-                    {
-                        "filename": fname,
-                        "email": content.get("email", ""),
-                        "expired": content.get("expired", ""),
-                        "uploaded_platforms": uploaded_platforms,
-                        "content": content,
-                    }
-                )
-            except Exception:
-                pass
+    all_files = storage.list_tokens()
+    for fname in all_files:
+        try:
+            content = storage.load_token(fname)
+            if not isinstance(content, dict):
+                content = {}
+            uploaded_platforms = _extract_uploaded_platforms(content)
+            tokens.append(
+                {
+                    "filename": fname,
+                    "email": content.get("email", ""),
+                    "expired": content.get("expired", ""),
+                    "uploaded_platforms": uploaded_platforms,
+                    "content": content,
+                }
+            )
+        except Exception:
+            pass
     return {"tokens": tokens}
 
 
@@ -1091,10 +1016,9 @@ async def api_delete_token(filename: str) -> Dict[str, str]:
     # 安全过滤：防止路径穿越
     if "/" in filename or "\\" in filename or ".." in filename:
         raise HTTPException(status_code=400, detail="非法文件名")
-    fpath = os.path.join(TOKENS_DIR, filename)
-    if not os.path.isfile(fpath):
+    if not storage.token_exists(filename):
         raise HTTPException(status_code=404, detail="文件不存在")
-    os.remove(fpath)
+    storage.delete_token(filename)
     return {"status": "deleted"}
 
 
@@ -1319,19 +1243,19 @@ async def api_sync_now(req: SyncNowRequest) -> Dict[str, Any]:
     results = []
     fnames = req.filenames
     if not fnames:
-        if os.path.isdir(TOKENS_DIR):
-            fnames = [f for f in os.listdir(TOKENS_DIR) if f.endswith(".json")]
+        fnames = storage.list_tokens()
 
     for fname in fnames:
         if "/" in fname or "\\" in fname or ".." in fname:
             continue
-        fpath = os.path.join(TOKENS_DIR, fname)
-        if not os.path.isfile(fpath):
+        if not storage.token_exists(fname):
             results.append({"file": fname, "ok": False, "error": "文件不存在"})
             continue
         try:
-            with open(fpath, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            data = storage.load_token(fname)
+            if not data:
+                results.append({"file": fname, "ok": False, "error": "Token 数据为空"})
+                continue
             rt = data.get("refresh_token", "").strip()
             email = data.get("email", fname)
             if not rt:
@@ -1339,7 +1263,7 @@ async def api_sync_now(req: SyncNowRequest) -> Dict[str, Any]:
                 continue
             result = _push_refresh_token(base_url, bearer, rt)
             if result["ok"]:
-                _mark_token_uploaded_platform(fpath, "sub2api")
+                _mark_token_uploaded_platform(fname, "sub2api")
             results.append({
                 "file": fname,
                 "email": email,
@@ -1712,20 +1636,21 @@ async def api_cpa_sync_batch(req: BatchSyncRequest) -> Dict[str, Any]:
 
     fnames = req.filenames or []
     if not fnames:
-        fnames = [f for f in os.listdir(TOKENS_DIR) if f.endswith(".json")]
+        fnames = storage.list_tokens()
 
     proxy = str(_sync_config.get("proxy", "") or "").strip()
     results = []
     for fname in fnames:
         if "/" in fname or "\\" in fname or ".." in fname:
             continue
-        fpath = os.path.join(TOKENS_DIR, fname)
-        if not os.path.isfile(fpath):
+        if not storage.token_exists(fname):
             results.append({"file": fname, "ok": False, "error": "文件不存在"})
             continue
         try:
-            with open(fpath, "r", encoding="utf-8") as f:
-                token_data = json.load(f)
+            token_data = storage.load_token(fname)
+            if not token_data:
+                results.append({"file": fname, "ok": False, "error": "Token 数据为空"})
+                continue
             email = token_data.get("email", fname)
             if _is_cpa_uploaded(token_data):
                 results.append({"file": fname, "email": email, "ok": True, "skipped": True})
@@ -1734,7 +1659,7 @@ async def api_cpa_sync_batch(req: BatchSyncRequest) -> Dict[str, Any]:
             ok = await run_in_threadpool(pm.upload_token, fname, token_data, proxy)
             results.append({"file": fname, "email": email, "ok": ok})
             if ok:
-                _mark_token_uploaded_platform(fpath, "cpa")
+                _mark_token_uploaded_platform(fname, "cpa")
                 _state.broadcast({
                     "ts": datetime.now().strftime("%H:%M:%S"),
                     "level": "success",
@@ -1771,19 +1696,20 @@ async def api_sync_batch(req: BatchSyncRequest) -> Dict[str, Any]:
 
     fnames = req.filenames or []
     if not fnames:
-        fnames = [f for f in os.listdir(TOKENS_DIR) if f.endswith(".json")]
+        fnames = storage.list_tokens()
 
     results = []
     for fname in fnames:
         if "/" in fname or "\\" in fname or ".." in fname:
             continue
-        fpath = os.path.join(TOKENS_DIR, fname)
-        if not os.path.isfile(fpath):
+        if not storage.token_exists(fname):
             results.append({"file": fname, "ok": False, "error": "文件不存在"})
             continue
         try:
-            with open(fpath, "r", encoding="utf-8") as f:
-                token_data = json.load(f)
+            token_data = storage.load_token(fname)
+            if not token_data:
+                results.append({"file": fname, "ok": False, "error": "Token 数据为空"})
+                continue
             email = token_data.get("email", fname)
             if _is_sub2api_uploaded(token_data):
                 results.append({"file": fname, "email": email, "ok": True, "skipped": True})
@@ -1791,7 +1717,7 @@ async def api_sync_batch(req: BatchSyncRequest) -> Dict[str, Any]:
             result = _push_account_api(base_url, bearer, email, token_data)
             results.append({"file": fname, "email": email, **result})
             if result["ok"]:
-                _mark_token_uploaded_platform(fpath, "sub2api")
+                _mark_token_uploaded_platform(fname, "sub2api")
                 _state.broadcast({
                     "ts": datetime.now().strftime("%H:%M:%S"),
                     "level": "success",

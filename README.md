@@ -1,6 +1,6 @@
 # OpenAI Pool Orchestrator
 
-> 自动化 OpenAI 账号注册、Token 管理与多平台账号池维护的 Web 可视化工具。
+> 自动化 OpenAI 账号注册、Token 管理与多平台账号池维护的 Web 可视化工具。支持本地运行与 Render 等无盘容器云部署。
 
 ## 功能概览
 
@@ -13,19 +13,19 @@
 | 多平台同步 | 支持向 Sub2Api 和 CPA 两个平台批量上传 Token |
 | 账号池维护 | 探测无效账号、刷新/清理异常账号、手动或自动补号 |
 | 实时日志 | 通过 SSE 推送注册过程的实时日志到 Web 前端 |
-| 代理支持 | 支持 HTTP/SOCKS5 代理，自动检测 IP 所在地 |
+| 代理/部署 | 支持 HTTP/SOCKS5 代理。支持接入 Redis 实现无盘容器云（如 Render）持久化部署 |
 
 ---
 
 ## 系统要求
 
 - **Python** >= 3.10
-- **操作系统**：Windows / Linux / macOS
+- **操作系统**：Windows / Linux / macOS（支持 Docker）
 - **网络**：需要能访问 OpenAI 的代理（不支持 CN/HK IP）
 
 ---
 
-## 安装部署
+## 本地部署
 
 ### 1. 克隆项目
 
@@ -40,23 +40,41 @@ cd openai-pool-orchestrator
 pip install -r requirements.txt
 ```
 
-### 3. 初始化配置
+> 本地模式默认将数据存放在 `data/` 目录，通过 JSON 文件持久化。
 
-```bash
-cp config/sync_config.example.json data/sync_config.json
-```
+---
 
-> 首次启动时如果 `data/sync_config.json` 不存在，系统会自动使用默认配置创建。
+## 容器云部署 (Render / 免费环境)
 
-依赖列表：
+由于 Render 等免费容器云重启后会丢失本地文件，本系统支持通过 Redis 外部存储实现数据持久化。
 
-| 包名 | 最低版本 | 用途 |
-|------|---------|------|
-| `fastapi` | >= 0.110 | Web 框架 |
-| `uvicorn[standard]` | >= 0.27 | ASGI 服务器 |
-| `curl-cffi` | >= 0.6 | 带浏览器指纹的 HTTP 客户端（绕过 CF） |
-| `aiohttp` | >= 3.9 | 异步 HTTP（账号池探测用） |
-| `requests` | >= 2.31 | 同步 HTTP 客户端 |
+### 1. 准备 Redis 数据库
+建议注册并使用 [Upstash](https://upstash.com/)，它提供免费的 Serverless Redis 数据库（每日 10K 请求，完全足够本项目使用）。
+获取你的 `REDIS_URL`，格式如：`redis://default:YOUR_PASSWORD@endpoint.upstash.io:6379`
+
+### 2. 在 Render 部署
+你可以在 Render 仪表盘连接 GitHub 仓库，或直接使用基于 `render.yaml` 的一键部署：
+- Build Command: `pip install -r requirements.txt`
+- Start Command: `python run.py`
+- 配置以下环境变量：
+
+| 环境变量 | 值 | 必填 | 说明 |
+|----------|-----|-----|------|
+| `STORAGE_BACKEND` | `redis` | 是 | 开启 Redis 外部存储模式 |
+| `REDIS_URL` | `redis://...` | 是 | 你的 Redis 连接地址 |
+
+配置完成后，服务每次重启都会自动从 Redis 恢复配置和获取你历史打出来的 Token！
+
+---
+
+## 核心依赖列表
+
+| 包名 | 用途 |
+|------|------|
+| `fastapi`, `uvicorn` | Web 框架及内置服务器 |
+| `curl-cffi` | 带有浏览器 TLS 指纹的 HTTP 客户端，绕过 Cloudflare 检测 |
+| `aiohttp`, `requests` | 异步探测与常规网络请求 |
+| `redis` | （可选/云部署必选）外部持久化存储支持 |
 
 ---
 

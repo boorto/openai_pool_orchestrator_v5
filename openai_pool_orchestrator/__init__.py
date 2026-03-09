@@ -14,7 +14,7 @@ from pathlib import Path
 PACKAGE_DIR = Path(__file__).parent
 PROJECT_ROOT = PACKAGE_DIR.parent
 
-# 运行时数据目录
+# 运行时数据目录（仅 FileStorage 后端使用，保留以兼容旧引用）
 DATA_DIR = PROJECT_ROOT / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
@@ -26,3 +26,7 @@ STATE_FILE = DATA_DIR / "state.json"
 
 # 前端静态文件目录
 STATIC_DIR = PACKAGE_DIR / "static"
+
+# 存储后端实例（单例）
+from .storage import get_storage  # noqa: E402
+storage = get_storage(DATA_DIR)

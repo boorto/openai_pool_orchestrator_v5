@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: openai-pool-orchestrator
+    env: docker
+    plan: free
+    healthCheckPath: /api/status
+    envVars:
+      - key: STORAGE_BACKEND
+        value: redis
+      - key: REDIS_URL
+        sync: false
+    # 可以利用 Dockerfile，如果你喜欢不用 docker，可将 env 改为 python 并指定 buildCommand / startCommand

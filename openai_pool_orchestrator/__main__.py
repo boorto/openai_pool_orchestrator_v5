@@ -12,9 +12,10 @@ from . import __version__
 
 
 def main():
+    port = int(os.environ.get("PORT", 18421))
     print("=" * 50)
     print(f"  OpenAI Pool Orchestrator v{__version__}")
-    print("  访问: http://localhost:18421")
+    print(f"  访问: http://localhost:{port}")
     print("  按 Ctrl+C 可退出")
     print("=" * 50)
 
@@ -39,10 +40,11 @@ def main():
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=18421,
+        port=port,
         log_level="warning",
     )
 
 
 if __name__ == "__main__":
     main()
+
