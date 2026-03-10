@@ -362,7 +362,7 @@ function clearLog() {
 // ==========================================
 async function checkProxy() {
   const proxy = DOM.proxyInput.value.trim();
-  if (!proxy) { showToast('请先填写代理地址', 'error'); return; }
+  
   DOM.proxyStatus.className = 'proxy-status';
   DOM.proxyStatus.innerHTML = '<span>检测中...</span>';
   DOM.checkProxyBtn.disabled = true;
@@ -393,7 +393,7 @@ async function checkProxy() {
 // ==========================================
 async function saveProxy() {
   const proxy = DOM.proxyInput.value.trim();
-  if (!proxy) { showToast('请先填写代理地址', 'error'); return; }
+  
   const auto_register = DOM.autoRegisterCheck ? DOM.autoRegisterCheck.checked : false;
   try {
     const res = await fetch('/api/proxy/save', {
@@ -417,7 +417,7 @@ async function saveProxy() {
 async function startTask() {
   const proxy = DOM.proxyInput.value.trim();
   const proxyPoolEnabled = DOM.proxyPoolEnabled ? DOM.proxyPoolEnabled.checked : false;
-  if (!proxy && !proxyPoolEnabled) { showToast('请填写代理地址或启用代理池', 'error'); return; }
+  
   const multithread = DOM.multithreadCheck ? DOM.multithreadCheck.checked : false;
   const thread_count = DOM.threadCountInput ? parseInt(DOM.threadCountInput.value) || 3 : 1;
   try {

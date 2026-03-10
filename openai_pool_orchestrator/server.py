@@ -1934,19 +1934,11 @@ def _try_auto_register() -> None:
     if not _sync_config.get("auto_register"):
         _state.broadcast({
             "ts": ts, "level": "info",
-            "message": "[AUTO] 自动注册未开启，跳过（请勾选「池不足自动注册」并保存代理）",
+            "message": "[AUTO] 自动注册未开启，跳过（请勾选「池不足自动注册」并保存）",
             "step": "auto_register",
         })
         return
     proxy = _sync_config.get("proxy", "").strip()
-    proxy_pool_enabled = bool(_sync_config.get("proxy_pool_enabled", False))
-    if not proxy and not proxy_pool_enabled:
-        _state.broadcast({
-            "ts": ts, "level": "warn",
-            "message": "[AUTO] 跳过自动注册：未配置固定代理且代理池未启用，请先配置",
-            "step": "auto_register",
-        })
-        return
     if _state.status != "idle":
         _state.broadcast({
             "ts": ts, "level": "info",
